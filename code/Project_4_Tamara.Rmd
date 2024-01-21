@@ -1,0 +1,352 @@
+---
+title: "Project_4"
+author: "Jiayu Tan 300102805"
+date: "`r Sys.Date()`"
+output: 
+    pdf_document :
+      latex_engine : xelatex
+---
+
+```{r setup, include=FALSE}
+df = read.csv('Flights1_2019_1.csv')
+new_data = data.frame('ORIGIN_AIRPORT_ID'=unique(df$ORIGIN_AIRPORT_ID))
+```
+
+```{r busy_day_of_week, include=TRUE}
+temp = c()
+temp3 = c()
+# look for busiest day of week for each airport
+for (i in new_data$ORIGIN_AIRPORT_ID){
+  temp=c(temp, which.max(table((df[df$ORIGIN_AIRPORT_ID == i, ])$DAY_OF_WEEK)))
+  temp3=c(temp3,
+          mean((df[df$ORIGIN_AIRPORT_ID == i, ])$DEP_DELAY, na.rm=TRUE))
+}
+new_data['BUSY_DAY_OF_WEEK']=temp
+new_data['Avg_Dep_Delay']=temp3
+rm(temp)
+rm(temp3)
+
+barplot(table(new_data$BUSY_DAY_OF_WEEK))
+plot(new_data$BUSY_DAY_OF_WEEK)
+
+```
+
+## Approaches to find outliers
+distance, density, probability, tree
+```{r test, include=TRUE}
+df1 = read.csv('grouped_data.csv')
+df1[,2:23]=scale(df1[,2:23])
+library(corrr)
+corr_matrix = cor(df1[,2:23])
+library(ggcorrplot)
+ggcorrplot(corr_matrix)
+data.pca = princomp(corr_matrix)
+summary(data.pca)
+trans = data.pca$loadings[, 1:5]
+trans
+
+```
+We see that the first component explain 64% variance of our dataset. Let's say we want to keep our information loss be less than 5%, we conduct a new linear combination of component one to five. 
+
+Next we derive our dimension deduced dataset. We should get a data frame that has 346 rows with 6 columns (1 be ID column). $transpose((5*22)*(22*346))$
+```{r 3, include=TRUE}
+dim(t(trans))
+dim(t(df1[,2:23]))
+newmatrix = t(t(trans)%*%t(df1[,2:23]))
+newdf=data.frame(ORIGINAL_AIRPORT_ID=df1[,1],
+                 as.data.frame(newmatrix))
+plot(newdf)
+```
+```{r}
+newdf
+```
+
+Since all airport does not have label on them, we can only apply unsupervised learning algorithm to find possible outliers. 
+
+Let's firstly use DBSCAN, which is a density based clustering algorithm.
+```{r DBSCAN, include=TRUE}
+library(fpc)
+# find average distances of point to its 5 nearest neighbors. 
+dbscan::kNNdistplot(newdf[2:6], k =  5)
+# it looks like distance of 3 would be a good choice
+db = fpc::dbscan(newdf[2:6], eps = 3, MinPts = 5)
+db
+plot(db, newdf, main = "DBScan")
+# find out these anomalous airport
+newdf$ORIGINAL_AIRPORT_ID[which(db$cluster==0)]
+plot(df1$ORIGIN_AIRPORT_ID, df1$AVG_DEP_DELAY, col=ifelse(df1$ORIGIN_AIRPORT_ID %in% newdf$ORIGINAL_AIRPORT_ID[which(db$cluster==0)], 'red', 'blue'))
+plot(df1$ORIGIN_AIRPORT_ID, df1$OUTLIERS_DEP_DELAY, col=ifelse(df1$ORIGIN_AIRPORT_ID %in% newdf$ORIGINAL_AIRPORT_ID[which(db$cluster==0)], 'red', 'blue'))
+```
+
+```{r}
+components <- newdf[, c("Comp.1", "Comp.2", "Comp.3", "Comp.4", "Comp.5")]
+components
+```
+
+
+```{r}
+mean_vector <- colMeans(components)
+cov_matrix <- cov(components)
+print("Mean vector:")
+print(mean_vector)
+print("Covarance Matrix:")
+print(cov_matrix)
+```
+
+
+```{r}
+mahalanobis_distances <- mahalanobis(components, center = mean_vector, cov = cov_matrix)
+mahalanobis_distances
+```
+```{r}
+# Combine distances with the original data
+newdf_with_distances <- cbind(newdf, Mahalanobis_Distances = mahalanobis_distances)
+newdf_with_distances
+```
+
+```{r}
+big_mahalanobis_distances <- newdf_with_distances[newdf_with_distances$Mahalanobis_Distances > 25, c("ORIGINAL_AIRPORT_ID", "Mahalanobis_Distances")]
+big_mahalanobis_distances
+```
+```{r}
+mahalanobis_distances2 <- sapply(1:nrow(newdf), function(i) {
+  point <- components[i, ]
+  mahalanobis_distances_to_other_points <- mahalanobis(components, center = point, cov = cov_matrix)
+  return(mahalanobis_distances_to_other_points)
+})
+
+# Convert the result to a dataframe
+mahalanobis_distances_df <- as.data.frame(mahalanobis_distances2)
+mahalanobis_distances_df
+```
+
+```{r}
+# Add a column for the ORIGINAL_AIRPORT_ID
+mahalanobis_distances_df$ORIGINAL_AIRPORT_ID <- df$ORIGINAL_AIRPORT_ID
+
+# Display the result
+print(mahalanobis_distances_df)
+```
+
+```{r}
+library(anomaly)
+
+isoForest_model <- IsolationForest(components, ntree = 100, n_samples = 256)
+
+# Predict outlier scores
+outlier_scores <- anomalyScores(model)
+
+# Add outlier scores to the original dataframe
+df_with_outliers <- cbind(newdf, OutlierScore = outlier_scores)
+
+# Display the result
+print(df_with_outliers)
+```
+
+```{r}
+Sigma.inv = matlib::inv(cov_matrix)
+
+M_d<-vector()
+
+for(j in 1:nrow(components)){
+  M_d[j] <- sqrt(as.matrix(components[j,1:5]-mean_vector) %*%
+  Sigma.inv %*%
+  t(as.matrix(components[j,1:5]-mean_vector)))
+}
+
+newdf_with_distances2 <- data.frame(newdf, M_d)
+summary(M_d)
+```
+
+```{r}
+newdf_with_distances2
+```
+
+```{r}
+library(dplyr) # we always assume that these
+library(ggplot2) # two packages have been loaded
+
+newdf_with_distances2 |> ggplot(aes(x=M_d)) + geom_histogram(colour="black",binwidth = 0.5) + geom_rug() + theme_bw()
+
+newdf_with_distances2 |> ggplot(aes(x=M_d)) + geom_boxplot() + geom_rug(color="black")
+
+```
+
+```{r}
+M_pq<-matrix(nrow=nrow(newdf_with_distances2), ncol=nrow(newdf_with_distances2))
+
+for(j in 1:nrow(newdf_with_distances2)){
+  for(i in 1:nrow(newdf_with_distances2)){
+    M_pq[j,i]<-sqrt(as.matrix(newdf_with_distances2[j,2:6]-newdf_with_distances2[i,2:6]) %*%
+               Sigma.inv %*%
+               t(as.matrix(newdf_with_distances2[j,2:6]-newdf_with_distances2[i,2:6])))
+  }
+}
+
+M_pq
+```
+
+```{r}
+M_pq<-as.data.frame.table(M_pq)
+M_pq[,1:2]<-lapply(M_pq[,1:2],as.numeric)
+
+M_pq |> ggplot(aes(x=Var1,y=Freq)) +
+  geom_point(aes(fill=Freq,colour=Freq),pch=22) +
+  scale_fill_continuous(high = "#0033FF", low = "#FFFFFF") +
+  scale_colour_continuous(high = "#0033FF", low = "#FFFFFF") +
+  scale_x_continuous(name="Observations") +
+  scale_y_continuous(name="Distance") +
+  theme_bw() + theme(legend.position = "none")
+```
+
+```{r}
+median.value <- M_pq |>
+  group_by(Var1) |>
+  summarise(meanDist=mean(Freq)) |>
+  summarise(median_value=median(meanDist))
+
+test <- M_pq |>
+  group_by(Var1) |>
+  summarise(meanDist=mean(Freq)) |>
+  summarise(std=sd(meanDist))
+
+```
+
+```{r}
+med.sd = test+median.value
+
+M_pq |> ggplot(aes(x=as.factor(Var1),y=Freq)) +
+  geom_boxplot() +
+  scale_x_discrete(name="Observations") +
+  scale_y_continuous(name="Distance") +
+  theme_bw() + theme(legend.position = "none") +
+  geom_hline(yintercept=as.numeric(median.value),
+             linetype = "dashed", color = "red") +
+  geom_hline(yintercept=as.numeric(med.sd),
+             linetype = "dotted", color = "red") +
+  theme(axis.text.x = element_text(angle=90))
+
+```
+
+```{r}
+M_pq |> group_by(Var1) |> summarise(meanDist=mean(Freq)) |>
+  ggplot(aes(x=Var1,y=meanDist)) +
+  scale_x_continuous(name="Observations") +
+  scale_y_continuous(name="Mean Mahalanobis Distance to Other Points") +
+  geom_point(aes(fill=meanDist,colour=meanDist,
+             size=meanDist),pch=22) +
+  scale_fill_continuous(high = "#0033FF",
+                        low = "#CCCCCC") +
+  scale_colour_continuous(high = "#0033FF",
+                          low = "#CCCCCC") +
+  theme_bw() + theme(legend.position = "none") +
+  geom_hline(yintercept=as.numeric(median.value),
+             linetype = "dashed", color = "red") +
+  geom_hline(yintercept=as.numeric(med.sd),
+             linetype = "dotted", color = "red")
+```
+```{r}
+M_pq |> group_by(Var1) |> summarise(meanDist = mean(Freq)) |>
+  print()
+```
+
+```{r}
+M_pq |> group_by(Var1) |> summarise(meanDist = mean(Freq)) |>
+  filter(meanDist >= 6) |>
+  print()
+```
+
+```{r}
+find_id_of_rows <- c(20, 142, 161, 233, 235, 240, 261, 276)
+IDs <- newdf_with_distances2$ORIGINAL_AIRPORT_ID[find_id_of_rows]
+IDs
+```
+
+```{r}
+components.scaled=data.frame(matrix(ncol = 5, nrow = nrow(components))) #nobs + 2 originally, not sure if i did it right
+for(i in 1:5){
+  components.scaled[,i] <-
+  2/(max(components[,i]) - min(components[,i])) * components[,i] - 1
+}
+lattice::splom(components.scaled[,1:5], pch=22)
+```
+```{r}
+components.scaled
+```
+
+```{r}
+m.L2 <- as.matrix(dist(components.scaled[,1:5], #idk if i should have scaled it again?????
+                  method="euclidean"))
+adoa.L2 <- data.frame(1:nrow(components), rowSums(m.L2))
+colnames(adoa.L2) <- c("obs","dist")
+adoa.L2 <- adoa.L2[order(-adoa.L2$dist),]
+rownames(adoa.L2) <- NULL
+head(adoa.L2)
+
+adoa.L2 |>
+  ggplot(aes(x=obs,y=dist)) +
+  scale_x_continuous(name="Observations") +
+  scale_y_continuous(name="Sum of Euclidean Distances") +
+  geom_point(aes(fill=dist, colour=dist, size=dist),
+  pch=22) +
+  scale_fill_continuous(high = "#0033FF", low = "#CCCCCC") +
+  scale_colour_continuous(high = "#0033FF", low = "#CCCCCC") +
+  theme_bw() + theme(legend.position = "none")
+
+```
+
+```{r}
+find_id_of_rows <- c(20, 240, 142, 161, 276)
+IDs <- newdf_with_distances2$ORIGINAL_AIRPORT_ID[find_id_of_rows]
+IDs
+```
+```{r}
+m.L2 <- as.matrix(dist(components.scaled[,1:5],
+                  method="maximum"))
+adoa.L2 <- data.frame(1:nrow(components), rowSums(m.L2))
+colnames(adoa.L2) <- c("obs","dist")
+adoa.L2 <- adoa.L2[order(-adoa.L2$dist),]
+rownames(adoa.L2) <- NULL
+head(adoa.L2)
+
+adoa.L2 |>
+  ggplot(aes(x=obs,y=dist)) +
+  scale_x_continuous(name="Observations") +
+  scale_y_continuous(name="Sum of Chebychev Distances") +
+  geom_point(aes(fill=dist, colour=dist, size=dist),
+  pch=22) +
+  scale_fill_continuous(high = "#0033FF", low = "#CCCCCC") +
+  scale_colour_continuous(high = "#0033FF", low = "#CCCCCC") +
+  theme_bw() + theme(legend.position = "none")
+
+```
+```{r}
+find_id_of_rows <- c(142, 20, 233, 240)
+IDs <- newdf_with_distances2$ORIGINAL_AIRPORT_ID[find_id_of_rows]
+IDs
+```
+```{r}
+m.L2 <- as.matrix(dist(components.scaled[,1:5],
+                  method="manhattan"))
+adoa.L2 <- data.frame(1:nrow(components), rowSums(m.L2))
+colnames(adoa.L2) <- c("obs","dist")
+adoa.L2 <- adoa.L2[order(-adoa.L2$dist),]
+rownames(adoa.L2) <- NULL
+head(adoa.L2, 7)
+
+adoa.L2 |>
+  ggplot(aes(x=obs,y=dist)) +
+  scale_x_continuous(name="Observations") +
+  scale_y_continuous(name="Sum of Manhattan Distances") +
+  geom_point(aes(fill=dist, colour=dist, size=dist),
+  pch=22) +
+  scale_fill_continuous(high = "#0033FF", low = "#CCCCCC") +
+  scale_colour_continuous(high = "#0033FF", low = "#CCCCCC") +
+  theme_bw() + theme(legend.position = "none")
+
+```
+```{r}
+find_id_of_rows <- c(240, 20, 161, 276, 235, 142, 261)
+IDs <- newdf_with_distances2$ORIGINAL_AIRPORT_ID[find_id_of_rows]
+IDs
+```
